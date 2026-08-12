@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -64,20 +65,33 @@ AGENTS = {
 # ──────────────────────────────────────────────
 
 def _parse_codex_jsonl(raw: str) -> str:
-    """codex --json JSONL 출력에서 assistant 메시지 텍스트만 추출한다."""
+    """codex --json JSONL 출력에서 실제 답변 텍스트만 추출한다."""
     parts = []
     for line in raw.splitlines():
         try:
             ev = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue
-        # message 이벤트에서 assistant 응답 추출
-        if ev.get("role") == "assistant":
-            for item in ev.get("content", []):
-                if isinstance(item, dict) and item.get("type") == "text":
-                    parts.append(item["text"])
-                elif isinstance(item, str):
-                    parts.append(item)
+        # item.completed 이벤트에서 텍스트 추출
+        if ev.get("type") == "item.completed":
+            item = ev.get("item", {})
+            text = item.get("text", "")
+            if text:
+                parts.append(text)
+                continue
+            # content 배열 안에 텍스트가 있는 경우
+            for c in item.get("content", []):
+                if isinstance(c, dict) and c.get("type") == "text":
+                    parts.append(c["text"])
+                elif isinstance(c, str):
+                    parts.append(c)
+        # role=assistant 형식 (이전 버전 호환)
+        elif ev.get("role") == "assistant":
+            for c in ev.get("content", []):
+                if isinstance(c, dict) and c.get("type") == "text":
+                    parts.append(c["text"])
+                elif isinstance(c, str):
+                    parts.append(c)
     return "\n".join(parts) if parts else raw
 
 
@@ -101,12 +115,22 @@ async def run_agent(agent_id: str, prompt: str, timeout: int) -> dict:
             "elapsed": 0,
         }
 
-    # 짧은 프롬프트는 인자로, 긴 프롬프트는 stdin으로 전달
-    use_stdin = len(prompt) > 4000
-    if use_stdin:
-        cmd = config["cmd"] + ["-"]  # stdin에서 읽도록 '-' 전달
+    # 특수문자가 포함된 긴 프롬프트는 셸 인자 대신 안전한 방법으로 전달
+    needs_safe = len(prompt) > 2000 or any(c in prompt for c in '`"\'{}$\\')
+    tmp_file = None
+    stdin_data = b""
+
+    if needs_safe and agent_id == "gemini":
+        # gemini: stdin으로 프롬프트 전달 + -p에 최소 지시문
+        cmd = config["cmd"] + ["위 내용에 답변해줘"]
+        stdin_data = prompt.encode("utf-8")
+    elif needs_safe:
+        # claude, codex는 stdin(-) 지원
+        cmd = config["cmd"] + ["-"]
+        stdin_data = prompt.encode("utf-8")
     else:
         cmd = config["cmd"] + [prompt]
+
     start = time.time()
 
     # 에이전트별 환경변수 + .env 병합
@@ -115,12 +139,11 @@ async def run_agent(agent_id: str, prompt: str, timeout: int) -> dict:
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            stdin=asyncio.subprocess.PIPE if use_stdin else None,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=proc_env,
         )
-        stdin_data = prompt.encode("utf-8") if use_stdin else None
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(input=stdin_data), timeout=timeout
         )
@@ -156,8 +179,6 @@ async def run_agent(agent_id: str, prompt: str, timeout: int) -> dict:
                 "elapsed": round(elapsed, 1),
             }
 
-        raw = stdout.decode("utf-8", errors="replace").strip()
-
         # codex --json: JSONL 이벤트에서 assistant 메시지만 추출
         if config.get("parse") == "codex_json":
             raw = _parse_codex_jsonl(raw)
@@ -188,6 +209,12 @@ async def run_agent(agent_id: str, prompt: str, timeout: int) -> dict:
             "output": None,
             "elapsed": round(elapsed, 1),
         }
+    finally:
+        if tmp_file:
+            try:
+                os.unlink(tmp_file.name)
+            except OSError:
+                pass
 
 
 async def run_all_agents(prompt: str, agent_ids: list[str], timeout: int) -> list[dict]:
@@ -272,7 +299,7 @@ async def merge_results(
     if judge_result["status"] == "ok":
         return judge_result["output"]
     else:
-        # 심사 에이전트 실패 시 결과만 나란히 보여줌
+        # 심사 에이전트 실패 시 결과만 나란히 보여줘
         fallback = "[심사 에이전트 실패 — 각 결과를 나란히 표시합니다]\n\n"
         for r in ok_results:
             fallback += f"{'='*40}\n  {r['name']} (소요: {r['elapsed']}초)\n{'='*40}\n"

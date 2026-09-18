@@ -53,9 +53,8 @@ AGENTS = {
         "parse": "codex_json",
     },
     "gemini": {
-        "cmd": ["gemini", "-p"],
+        "cmd": ["agy", "-p"],
         "name": "Gemini",
-        "env": {"GEMINI_CLI_TRUST_WORKSPACE": "true"},
     },
 }
 

@@ -26,6 +26,9 @@ Python 3.10 이상 필요. 외부 패키지 의존성 없음.
 
 ## 설치
 
+개발자: 아래 방법으로 설치하세요.  
+비개발자: **[설치 가이드 (INSTALL.md)](INSTALL.md)** 를 참고하세요.
+
 ```bash
 git clone https://github.com/coco-bmf/multi-agent-runner.git
 cd multi-agent-runner
